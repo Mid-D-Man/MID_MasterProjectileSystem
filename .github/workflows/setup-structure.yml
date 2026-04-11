@@ -1,0 +1,141 @@
+name: Setup Project Structure
+
+on:
+  workflow_dispatch:
+
+jobs:
+  scaffold:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create directory tree
+        run: |
+          # ── Rust crate ──────────────────────────────────
+          mkdir -p projectile_core/src
+
+          # ── Unity Assets ─────────────────────────────────
+          mkdir -p UnityProject/Assets/Plugins/Native/macOS
+          mkdir -p UnityProject/Assets/Plugins/Native/Windows
+          mkdir -p UnityProject/Assets/Plugins/Native/Linux
+          mkdir -p UnityProject/Assets/Scripts/Projectiles
+          mkdir -p UnityProject/Assets/Shaders
+          mkdir -p UnityProject/Assets/Materials
+          mkdir -p UnityProject/Assets/Prefabs
+          mkdir -p UnityProject/Assets/Resources/ProjectileConfigs
+          mkdir -p UnityProject/Assets/Resources/ProjectileAtlas
+          mkdir -p UnityProject/Assets/Textures/Projectiles
+          mkdir -p UnityProject/Packages
+
+          # ── Gitkeep for binary/empty dirs ─────────────────
+          touch UnityProject/Assets/Plugins/Native/macOS/.gitkeep
+          touch UnityProject/Assets/Plugins/Native/Windows/.gitkeep
+          touch UnityProject/Assets/Plugins/Native/Linux/.gitkeep
+          touch UnityProject/Assets/Resources/ProjectileAtlas/.gitkeep
+          touch UnityProject/Assets/Textures/Projectiles/.gitkeep
+          touch UnityProject/Assets/Materials/.gitkeep
+          touch UnityProject/Assets/Prefabs/.gitkeep
+
+          # ── Rust source stubs ──────────────────────────────
+          touch projectile_core/Cargo.toml
+          touch projectile_core/src/lib.rs
+          touch projectile_core/src/simulation.rs
+          touch projectile_core/src/collision.rs
+          touch projectile_core/src/patterns.rs
+          touch projectile_core/src/state.rs
+
+          # ── Unity C# stubs ─────────────────────────────────
+          touch UnityProject/Assets/Scripts/Projectiles/NativeProjectile.cs
+          touch UnityProject/Assets/Scripts/Projectiles/ProjectileLib.cs
+          touch UnityProject/Assets/Scripts/Projectiles/ProjectileConfigSO.cs
+          touch UnityProject/Assets/Scripts/Projectiles/ProjectileRegistry.cs
+          touch UnityProject/Assets/Scripts/Projectiles/ProjectileManager.cs
+          touch UnityProject/Assets/Scripts/Projectiles/TrailObjectPool.cs
+          touch UnityProject/Assets/Scripts/Projectiles/ProjectileRenderer2D.cs
+          touch UnityProject/Assets/Scripts/Projectiles/WeaponNetworkBridge.cs
+
+          # ── Shader stub ────────────────────────────────────
+          touch UnityProject/Assets/Shaders/InstancedProjectile.shader
+
+          # ── Root files ─────────────────────────────────────
+          touch README.md
+
+      - name: Write .gitignore
+        run: |
+          cat > .gitignore << 'EOF'
+          # ── Rust ──────────────────────────────────────────
+          projectile_core/target/
+
+          # ── Unity generated ───────────────────────────────
+          UnityProject/Library/
+          UnityProject/Temp/
+          UnityProject/Logs/
+          UnityProject/UserSettings/
+          UnityProject/obj/
+          UnityProject/Build/
+          UnityProject/Builds/
+          UnityProject/MemoryCaptures/
+          UnityProject/Recordings/
+
+          # Keep compiled native libs in git
+          !UnityProject/Assets/Plugins/Native/**/*.dll
+          !UnityProject/Assets/Plugins/Native/**/*.dylib
+          !UnityProject/Assets/Plugins/Native/**/*.so
+
+          # ── macOS ─────────────────────────────────────────
+          .DS_Store
+          **/.DS_Store
+          *.swp
+          EOF
+
+      - name: Write Unity manifest stub
+        run: |
+          mkdir -p UnityProject/Packages
+          cat > UnityProject/Packages/manifest.json << 'EOF'
+          {
+            "dependencies": {
+              "com.unity.netcode.gameobjects": "1.7.1",
+              "com.unity.transport": "1.4.0",
+              "com.unity.inputsystem": "1.7.0",
+              "com.unity.2d.sprite": "1.0.0",
+              "com.unity.render-pipelines.universal": "14.0.9"
+            }
+          }
+          EOF
+
+      - name: Write README stub
+        run: |
+          cat > README.md << 'EOF'
+          # MidMan Projectile System
+
+          High-performance networked projectile system for Unity 2022.3 LTS.
+
+          ## Stack
+          - **Rust cdylib** — simulation, collision, pattern generation
+          - **Unity NGO 1.7** on **UTP 1.4** — network layer
+          - **Graphics.DrawMeshInstanced** — rendering, zero GameObjects per bullet
+
+          ## Setup
+          1. Open `UnityProject/` in Unity 2022.3.13f1
+          2. Install packages from `Packages/manifest.json`
+          3. Libs are pre-built in `Assets/Plugins/Native/`
+          4. To rebuild libs manually: `cd projectile_core && cargo build --release`
+
+          ## Workflows
+          - `setup-structure` — scaffold empty project (run once)
+          - `build-rust-libs` — cross-compile and commit native libs
+          EOF
+
+      - name: Commit scaffold
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          git diff --staged --quiet \
+            && echo "Nothing to commit" \
+            || git commit -m "chore: scaffold project structure [skip ci]"
+          git push
