@@ -1,0 +1,178 @@
+name: Build Rust Native Libs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'projectile_core/**'
+  workflow_dispatch:
+
+# Builds a universal macOS dylib (x86_64 + arm64),
+# a Windows dll (cross from Linux via mingw),
+# and a Linux so (native), then commits all three
+# into UnityProject/Assets/Plugins/Native/.
+
+jobs:
+  # ───────────────────────────────────────────────
+  build-macos:
+  # ───────────────────────────────────────────────
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            projectile_core/target
+          key: macos-cargo-${{ hashFiles('projectile_core/Cargo.toml') }}
+          restore-keys: macos-cargo-
+
+      - name: Build x86_64
+        working-directory: projectile_core
+        run: cargo build --release --target x86_64-apple-darwin
+
+      - name: Build aarch64
+        working-directory: projectile_core
+        run: cargo build --release --target aarch64-apple-darwin
+
+      - name: Lipo universal binary
+        working-directory: projectile_core
+        run: |
+          lipo -create \
+            target/x86_64-apple-darwin/release/libprojectile_core.dylib \
+            target/aarch64-apple-darwin/release/libprojectile_core.dylib \
+            -output libprojectile_core_universal.dylib
+          lipo -info libprojectile_core_universal.dylib
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-macos
+          path: projectile_core/libprojectile_core_universal.dylib
+          retention-days: 1
+
+  # ───────────────────────────────────────────────
+  build-windows:
+  # ───────────────────────────────────────────────
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable + Windows target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+
+      - name: Install mingw cross-compiler
+        run: sudo apt-get install -y gcc-mingw-w64-x86-64
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            projectile_core/target
+          key: windows-cargo-${{ hashFiles('projectile_core/Cargo.toml') }}
+          restore-keys: windows-cargo-
+
+      - name: Configure cargo for mingw linker
+        run: |
+          mkdir -p ~/.cargo
+          cat >> ~/.cargo/config.toml << 'EOF'
+          [target.x86_64-pc-windows-gnu]
+          linker = "x86_64-w64-mingw32-gcc"
+          EOF
+
+      - name: Build
+        working-directory: projectile_core
+        run: cargo build --release --target x86_64-pc-windows-gnu
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-windows
+          path: projectile_core/target/x86_64-pc-windows-gnu/release/projectile_core.dll
+          retention-days: 1
+
+  # ───────────────────────────────────────────────
+  build-linux:
+  # ───────────────────────────────────────────────
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            projectile_core/target
+          key: linux-cargo-${{ hashFiles('projectile_core/Cargo.toml') }}
+          restore-keys: linux-cargo-
+
+      - name: Build
+        working-directory: projectile_core
+        run: cargo build --release
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-linux
+          path: projectile_core/target/release/libprojectile_core.so
+          retention-days: 1
+
+  # ───────────────────────────────────────────────
+  commit-to-repo:
+  # ───────────────────────────────────────────────
+    needs: [build-macos, build-windows, build-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: downloaded-libs
+
+      - name: Copy libs into Unity plugin dirs
+        run: |
+          cp downloaded-libs/native-macos/libprojectile_core_universal.dylib \
+             UnityProject/Assets/Plugins/Native/macOS/libprojectile_core.dylib
+
+          cp downloaded-libs/native-windows/projectile_core.dll \
+             UnityProject/Assets/Plugins/Native/Windows/projectile_core.dll
+
+          cp downloaded-libs/native-linux/libprojectile_core.so \
+             UnityProject/Assets/Plugins/Native/Linux/libprojectile_core.so
+
+      - name: Show what changed
+        run: ls -lh UnityProject/Assets/Plugins/Native/**/*
+
+      - name: Commit native libs
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add UnityProject/Assets/Plugins/Native/
+          git diff --staged --quiet \
+            && echo "Libs unchanged — nothing to commit" \
+            || git commit -m "ci: rebuild native libs [skip ci]"
+          git push
