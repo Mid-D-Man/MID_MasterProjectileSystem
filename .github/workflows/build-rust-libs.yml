@@ -7,15 +7,19 @@ on:
       - 'projectile_core/**'
   workflow_dispatch:
 
-# Builds a universal macOS dylib (x86_64 + arm64),
-# a Windows dll (cross from Linux via mingw),
-# and a Linux so (native), then commits all three
-# into UnityProject/Assets/Plugins/Native/.
+# Builds:
+#   macOS   — universal dylib (x86_64 + arm64)
+#   Windows — dll (cross from Linux via mingw)
+#   Linux   — so (native)
+#   Android — arm64-v8a .so + armeabi-v7a .so (via Android NDK)
+#   iOS     — universal .a (device arm64 + simulator arm64)
+#
+# All committed into UnityProject/Assets/Plugins/Native/<platform>/
 
 jobs:
-  # ───────────────────────────────────────────────
+  # ─────────────────────────────────────────────
   build-macos:
-  # ───────────────────────────────────────────────
+  # ─────────────────────────────────────────────
     runs-on: macos-latest
 
     steps:
@@ -44,7 +48,7 @@ jobs:
         working-directory: projectile_core
         run: cargo build --release --target aarch64-apple-darwin
 
-      - name: Lipo universal binary
+      - name: Lipo universal dylib
         working-directory: projectile_core
         run: |
           lipo -create \
@@ -60,9 +64,9 @@ jobs:
           path: projectile_core/libprojectile_core_universal.dylib
           retention-days: 1
 
-  # ───────────────────────────────────────────────
+  # ─────────────────────────────────────────────
   build-windows:
-  # ───────────────────────────────────────────────
+  # ─────────────────────────────────────────────
     runs-on: ubuntu-latest
 
     steps:
@@ -105,9 +109,9 @@ jobs:
           path: projectile_core/target/x86_64-pc-windows-gnu/release/projectile_core.dll
           retention-days: 1
 
-  # ───────────────────────────────────────────────
+  # ─────────────────────────────────────────────
   build-linux:
-  # ───────────────────────────────────────────────
+  # ─────────────────────────────────────────────
     runs-on: ubuntu-latest
 
     steps:
@@ -137,10 +141,133 @@ jobs:
           path: projectile_core/target/release/libprojectile_core.so
           retention-days: 1
 
-  # ───────────────────────────────────────────────
+  # ─────────────────────────────────────────────
+  build-android:
+  # ─────────────────────────────────────────────
+  # Produces arm64-v8a and armeabi-v7a .so files.
+  # Uses cargo-ndk which handles NDK toolchain wiring automatically.
+  # The Android NDK is pre-installed on ubuntu-latest GitHub runners.
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable + Android targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --version "^3"
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            projectile_core/target
+          key: android-cargo-${{ hashFiles('projectile_core/Cargo.toml') }}
+          restore-keys: android-cargo-
+
+      # NDK is pre-installed; locate it
+      - name: Locate Android NDK
+        run: |
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> $GITHUB_ENV
+          echo "NDK at: $ANDROID_NDK_LATEST_HOME"
+
+      - name: Build arm64-v8a
+        working-directory: projectile_core
+        run: cargo ndk -t arm64-v8a -o ./android-out build --release
+
+      - name: Build armeabi-v7a
+        working-directory: projectile_core
+        run: cargo ndk -t armeabi-v7a -o ./android-out build --release
+
+      - name: Build x86_64 (Android emulator)
+        working-directory: projectile_core
+        run: cargo ndk -t x86_64 -o ./android-out build --release
+
+      - name: Upload Android artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-android
+          path: projectile_core/android-out/
+          retention-days: 1
+
+  # ─────────────────────────────────────────────
+  build-ios:
+  # ─────────────────────────────────────────────
+  # Produces a universal static library (.a) for:
+  #   aarch64-apple-ios        — physical device
+  #   aarch64-apple-ios-sim    — M1/M2 simulator
+  #   x86_64-apple-ios         — Intel simulator (legacy)
+  #
+  # App Store policy: dynamic libs forbidden on iOS.
+  # Cargo.toml must include staticlib in crate-type.
+  #
+  # Unity iOS build embeds the .a and calls it via IL2CPP P/Invoke.
+  # The DllImport name "projectile_core" resolves to
+  # "__Internal" on IL2CPP/iOS — no file extension needed.
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable + iOS targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            projectile_core/target
+          key: ios-cargo-${{ hashFiles('projectile_core/Cargo.toml') }}
+          restore-keys: ios-cargo-
+
+      - name: Build device (arm64)
+        working-directory: projectile_core
+        run: cargo build --release --target aarch64-apple-ios
+
+      - name: Build simulator arm64 (M-series Mac)
+        working-directory: projectile_core
+        run: cargo build --release --target aarch64-apple-ios-sim
+
+      - name: Build simulator x86_64 (Intel Mac, legacy)
+        working-directory: projectile_core
+        run: cargo build --release --target x86_64-apple-ios
+
+      - name: Lipo simulator universal (x86_64 + arm64-sim)
+        working-directory: projectile_core
+        run: |
+          lipo -create \
+            target/aarch64-apple-ios-sim/release/libprojectile_core.a \
+            target/x86_64-apple-ios/release/libprojectile_core.a \
+            -output libprojectile_core_sim_universal.a
+          lipo -info libprojectile_core_sim_universal.a
+
+      - name: Upload iOS device artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-ios-device
+          path: projectile_core/target/aarch64-apple-ios/release/libprojectile_core.a
+          retention-days: 1
+
+      - name: Upload iOS simulator artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-ios-sim
+          path: projectile_core/libprojectile_core_sim_universal.a
+          retention-days: 1
+
+  # ─────────────────────────────────────────────
   commit-to-repo:
-  # ───────────────────────────────────────────────
-    needs: [build-macos, build-windows, build-linux]
+  # ─────────────────────────────────────────────
+    needs: [build-macos, build-windows, build-linux, build-android, build-ios]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -153,8 +280,12 @@ jobs:
         with:
           path: downloaded-libs
 
+      - name: Show downloaded tree
+        run: find downloaded-libs -type f
+
       - name: Copy libs into Unity plugin dirs
         run: |
+          # ── Desktop ──────────────────────────────────────────────────────────
           cp downloaded-libs/native-macos/libprojectile_core_universal.dylib \
              UnityProject/Assets/Plugins/Native/macOS/libprojectile_core.dylib
 
@@ -164,8 +295,35 @@ jobs:
           cp downloaded-libs/native-linux/libprojectile_core.so \
              UnityProject/Assets/Plugins/Native/Linux/libprojectile_core.so
 
+          # ── Android ───────────────────────────────────────────────────────────
+          mkdir -p UnityProject/Assets/Plugins/Native/Android/arm64-v8a
+          mkdir -p UnityProject/Assets/Plugins/Native/Android/armeabi-v7a
+          mkdir -p UnityProject/Assets/Plugins/Native/Android/x86_64
+
+          cp downloaded-libs/native-android/arm64-v8a/libprojectile_core.so \
+             UnityProject/Assets/Plugins/Native/Android/arm64-v8a/libprojectile_core.so
+
+          cp downloaded-libs/native-android/armeabi-v7a/libprojectile_core.so \
+             UnityProject/Assets/Plugins/Native/Android/armeabi-v7a/libprojectile_core.so
+
+          cp downloaded-libs/native-android/x86_64/libprojectile_core.so \
+             UnityProject/Assets/Plugins/Native/Android/x86_64/libprojectile_core.so
+
+          # ── iOS ────────────────────────────────────────────────────────────────
+          # Device lib goes in Plugins/iOS. Simulator lib is for Editor testing only.
+          mkdir -p UnityProject/Assets/Plugins/Native/iOS
+
+          cp downloaded-libs/native-ios-device/libprojectile_core.a \
+             UnityProject/Assets/Plugins/Native/iOS/libprojectile_core.a
+
+          # Simulator lib: keep alongside for XcodeWorkspace editor builds
+          # Unity's iOS build process picks up the .a automatically when
+          # the plugin meta file marks it for iOS platform.
+          cp downloaded-libs/native-ios-sim/libprojectile_core_sim_universal.a \
+             UnityProject/Assets/Plugins/Native/iOS/libprojectile_core_sim.a
+
       - name: Show what changed
-        run: ls -lh UnityProject/Assets/Plugins/Native/**/*
+        run: find UnityProject/Assets/Plugins/Native -type f | sort
 
       - name: Commit native libs
         run: |
