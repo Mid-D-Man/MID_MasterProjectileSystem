@@ -90,33 +90,34 @@ namespace MidManStudio.Projectiles
         }
 
         /// <summary>
-        /// Called by WeaponNetworkBridge when a spawn RPC arrives.
-        /// Scale behaviour is determined entirely by the config's SpawnScaleFraction:
-        ///   = 1.0  → bullet spawns at full size, no growth (scale_speed stays 0)
-        ///   < 1.0  → bullet spawns small and grows, Rust lerps it each tick
-        /// This is per-config, not per-bullet — all bullets of the same type behave the same.
+        /// Spawn projectiles from a config. Called by WeaponNetworkBridge.
+        /// seed is passed from the server RPC so all clients get identical patterns.
         /// </summary>
         public void Spawn(
-            ushort configId,
+            ushort  configId,
             Vector2 origin,
-            float angleDeg,
-            float speed,
-            float latencyComp,
-            ushort ownerId,
-            uint seed)
+            float   angleDeg,
+            float   speed,
+            float   latencyComp,
+            ushort  ownerId,
+            uint    seed)
         {
             var cfg = ProjectileRegistry.Instance.Get(configId);
             if (cfg == null) return;
 
+            // BaseProjId tells Rust where to start assigning proj_ids
+            // so IDs are globally unique across all spawn calls.
             var req = new SpawnRequest
             {
-                OriginX   = origin.x,
-                OriginY   = origin.y,
-                AngleDeg  = angleDeg,
-                Speed     = speed,
-                ConfigId  = configId,
-                OwnerId   = ownerId,
-                PatternId = (byte)cfg.Pattern,
+                OriginX    = origin.x,
+                OriginY    = origin.y,
+                AngleDeg   = angleDeg,
+                Speed      = speed,
+                ConfigId   = configId,
+                OwnerId    = ownerId,
+                PatternId  = (byte)cfg.Pattern,
+                RngSeed    = seed,          // deterministic spread variance
+                BaseProjId = _nextProjId,   // Rust fills proj_id from here upward
             };
 
             var tempBuf    = new NativeProjectile[32];
@@ -130,29 +131,24 @@ namespace MidManStudio.Projectiles
             {
                 ProjectileLib.spawn_pattern(reqPtr, tempPtr, 32, out int spawnCount);
 
+                // Advance ID counter past however many Rust will have assigned
+                _nextProjId += (uint)spawnCount;
+
                 for (int i = 0; i < spawnCount && _activeCount < _maxProjectiles; i++)
                 {
                     var p = tempBuf[i];
 
-                    // --- Config-driven fields (C# writes, Rust reads each tick) ---
                     p.Lifetime     = cfg.Lifetime;
                     p.MaxLifetime  = cfg.Lifetime;
                     p.MovementType = (byte)cfg.Movement;
                     p.PiercingType = (byte)cfg.Piercing;
                     p.Ay           = cfg.GravityScale;
-                    p.ProjId       = _nextProjId++;
 
-                    // --- Scale behaviour ---
-                    // Rust spawns everything at scale 1.0 with scale_speed 0.0.
-                    // We override here based on config.
-                    // If SpawnScaleFraction is effectively 1.0, nothing grows —
-                    // scale_speed stays 0 and tick_scale() skips this projectile.
                     p.ScaleX      = cfg.FullSizeX * cfg.SpawnScaleFraction;
                     p.ScaleY      = cfg.FullSizeY * cfg.SpawnScaleFraction;
-                    p.ScaleTarget = cfg.FullSizeX; // always grow to full X (uniform)
+                    p.ScaleTarget = cfg.FullSizeX;
                     p.ScaleSpeed  = cfg.SpawnScaleFraction < 0.999f ? cfg.GrowthSpeed : 0f;
 
-                    // --- Latency compensation ---
                     if (latencyComp > 0f)
                     {
                         p.X        += p.Vx * latencyComp;
@@ -228,5 +224,10 @@ namespace MidManStudio.Projectiles
                 else { i++; }
             }
         }
+
+        // ── Bench-friendly accessors ──────────────────────────────────────────
+
+        public int ActiveCount => _activeCount;
+        public int MaxProjectiles => _maxProjectiles;
     }
 }
