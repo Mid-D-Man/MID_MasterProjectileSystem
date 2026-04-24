@@ -5,12 +5,11 @@ edition = "2021"
 
 [lib]
 name = "projectile_core"
-# cdylib  = macOS .dylib / Windows .dll / Linux .so / Android .so
-# staticlib = iOS .a (App Store forbids dynamic libs)
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
 ultraviolet = "0.9"
+lazy_static = "1.5"
 
 [profile.release]
 opt-level = 3
