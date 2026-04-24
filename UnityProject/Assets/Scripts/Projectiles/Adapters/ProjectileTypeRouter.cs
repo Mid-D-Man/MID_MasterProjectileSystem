@@ -250,27 +250,26 @@ public bool IsRaycastWeapon;
         /// Not called at runtime.
         /// </summary>
         public static string ExplainRoute(
-            ProjectileConfigScriptableObject config,
-            WeaponFireContext context)
-        {
-            if (!context.IsNetworked)
-                return "LocalOnly — not a networked session.";
+    ProjectileConfigScriptableObject config,
+    WeaponFireContext context)
+{
+    if (!context.IsNetworked)
+        return "LocalOnly — not a networked session.";
 
-            if (config.HasSimModeOverride)
-                return $"Config override: {config.get_PreferredSimMode}.";
+    if (config.HasSimModeOverride)
+        return $"Config override: {config.PreferredSimMode}.";
 
-            if (RequiresPhysicsObject(config))
-                return $"PhysicsObject — type '{config.get_ProjectileType}' " +
-                       $"or physics '{config.get_ProjectileExtraPhysicsType}' requires Unity Rigidbody.";
+    if (RequiresPhysicsObject(config))
+        return $"PhysicsObject — projectile type or physics type requires Unity Rigidbody.";
 
-            if (context.FireRate >= RaycastFireRateThreshold && IsRaycastEligible(config))
-                return $"Raycast — fireRate {context.FireRate:F1} >= {RaycastFireRateThreshold} " +
-                       $"and projectile has no piercing or special physics.";
+    if (context.IsRaycastWeapon && IsRaycastEligible(config))
+        return "Raycast — weapon script owns the Physics2D.Raycast call. " +
+               "System handles visual and RPC only.";
 
-            if (config.get_Is3D)
-                return "RustSim3D — Is3D flag set on config.";
+    if (config.Is3D)
+        return "RustSim3D — Is3D flag set on config.";
 
-            return "RustSim2D — default.";
-        }
+    return "RustSim2D — default.";
+}
     }
 }
