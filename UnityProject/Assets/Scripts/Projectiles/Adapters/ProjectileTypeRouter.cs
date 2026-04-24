@@ -33,7 +33,12 @@ namespace MidManStudio.Projectiles
         /// Burst fire: use the burst-internal fire rate, not the burst repeat rate.
         /// </summary>
         public float FireRate;
-
+/// <summary>
+/// True when the weapon script handles Physics2D/3D.Raycast itself.
+/// When true, the projectile system handles visual + RPC only — it does NOT cast a ray.
+/// The weapon calls MID_MasterProjectileSystem.RegisterRaycastHit() with the result.
+/// </summary>
+public bool IsRaycastWeapon;
         /// <summary>
         /// Number of projectiles fired in this single fire event (e.g. 8 for shotgun pellets).
         /// Used by BatchSpawnHelper to choose Burst vs C# fill path, not for SimulationMode routing.
