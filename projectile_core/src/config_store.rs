@@ -1,125 +1,124 @@
-// config_store.rs — Rust-side movement parameter store
+// config_store.rs
+// Per-config movement parameter store for Wave and Circular movement types.
 //
-// Stores per-config-type movement parameters indexed by config_id (u16).
-// This is the ONLY data stored Rust-side by config_id — not a general config store.
+// Platform dispatch — following glam's cfg pattern:
+//   Non-WASM (desktop/mobile): RwLock<HashMap> — thread-safe, lock-free reads after init.
+//   WASM (WebGL): thread_local! + RefCell — WASM is single-threaded, no std::sync available.
+//   scalar-math feature: same as WASM path for maximum compatibility.
 //
-// Why this exists:
-//   Wave and circular movement need per-type constants (amplitude, frequency, radius,
-//   angular_speed) read EVERY TICK inside the hot loop. Storing them per-projectile
-//   would add 8-16 bytes to every NativeProjectile, bloating cache lines for all
-//   projectiles to serve the subset that use wave/circular movement.
-//
-//   Registering once at startup and looking up by config_id costs one HashMap access
-//   per tick for wave/circular projectiles only. Straight/arching/guided/teleport
-//   projectiles never touch this store.
-//
-// Thread safety:
-//   Registration happens on the main thread at startup before any simulation runs.
-//   Tick reads are read-only after registration. No locking needed in practice.
-//   Using std::sync::RwLock for correctness if Unity ever calls tick from a job thread.
+// Registration happens main-thread only at startup.
+// Tick reads are read-only after registration.
+// The cfg selection is resolved at compile time — zero runtime branching.
 
-use std::collections::HashMap;
-use std::sync::RwLock;
+// ── Param types (platform-independent) ───────────────────────────────────────
 
-// ── Wave movement parameters ──────────────────────────────────────────────────
-
-/// Parameters for sine/cosine lateral wave movement.
-/// Applied in tick_wave(): projectile travels forward while oscillating perpendicular.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct WaveParams {
-    /// Lateral displacement amplitude in world units.
-    /// 0.0 = no oscillation (degenerate straight line — don't register this).
-    pub amplitude: f32,
-
-    /// Oscillation frequency in cycles per second.
-    pub frequency: f32,
-
-    /// Phase offset in radians. Allows multiple wave projectiles from the same
-    /// weapon to be out of phase (e.g. helical spread pattern).
+    pub amplitude:    f32,
+    pub frequency:    f32,
     pub phase_offset: f32,
-
-    /// If true, oscillates on Y axis (vertical wave). If false, oscillates on X axis
-    /// (horizontal wave relative to travel direction). For 3D, the perpendicular
-    /// is computed from velocity cross world-up.
-    pub vertical: bool,
-
-    pub _pad: [u8; 3],
+    pub vertical:     bool,
+    pub _pad:         [u8; 3],
 }
 
-// ── Circular movement parameters ──────────────────────────────────────────────
-
-/// Parameters for circular orbit movement.
-/// The projectile orbits around its own travel axis while moving forward.
-/// This produces a helical/corkscrew path.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct CircularParams {
-    /// Radius of the circular orbit in world units.
-    pub radius: f32,
-
-    /// Angular speed of the orbit in degrees per second.
-    /// Positive = counter-clockwise, negative = clockwise.
-    pub angular_speed: f32,
-
-    /// Starting angle of the orbit in degrees.
-    /// Allows multiple projectiles to start at different positions on the orbit.
+    pub radius:          f32,
+    pub angular_speed:   f32,
     pub start_angle_deg: f32,
 }
 
-// ── Global stores ─────────────────────────────────────────────────────────────
+// ── Platform-specific store implementation ────────────────────────────────────
 
-lazy_static::lazy_static! {
-    static ref WAVE_PARAMS: RwLock<HashMap<u16, WaveParams>> =
-        RwLock::new(HashMap::new());
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    not(feature = "scalar-math")
+))]
+mod store_impl {
+    use super::{WaveParams, CircularParams};
+    use std::collections::HashMap;
+    use std::sync::RwLock;
 
-    static ref CIRCULAR_PARAMS: RwLock<HashMap<u16, CircularParams>> =
-        RwLock::new(HashMap::new());
-}
+    lazy_static::lazy_static! {
+        static ref WAVE:     RwLock<HashMap<u16, WaveParams>>     = RwLock::new(HashMap::new());
+        static ref CIRCULAR: RwLock<HashMap<u16, CircularParams>> = RwLock::new(HashMap::new());
+    }
 
-// ── Registration (called from C# at startup) ──────────────────────────────────
-
-pub fn register_wave(config_id: u16, params: WaveParams) {
-    if let Ok(mut map) = WAVE_PARAMS.write() {
-        map.insert(config_id, params);
+    pub fn reg_wave(id: u16, p: WaveParams) {
+        if let Ok(mut m) = WAVE.write() { m.insert(id, p); }
+    }
+    pub fn reg_circular(id: u16, p: CircularParams) {
+        if let Ok(mut m) = CIRCULAR.write() { m.insert(id, p); }
+    }
+    pub fn unreg_wave(id: u16) {
+        if let Ok(mut m) = WAVE.write() { m.remove(&id); }
+    }
+    pub fn unreg_circular(id: u16) {
+        if let Ok(mut m) = CIRCULAR.write() { m.remove(&id); }
+    }
+    pub fn clear() {
+        if let Ok(mut m) = WAVE.write()     { m.clear(); }
+        if let Ok(mut m) = CIRCULAR.write() { m.clear(); }
+    }
+    pub fn get_wave(id: u16) -> Option<WaveParams> {
+        WAVE.read().ok()?.get(&id).copied()
+    }
+    pub fn get_circular(id: u16) -> Option<CircularParams> {
+        CIRCULAR.read().ok()?.get(&id).copied()
     }
 }
 
-pub fn register_circular(config_id: u16, params: CircularParams) {
-    if let Ok(mut map) = CIRCULAR_PARAMS.write() {
-        map.insert(config_id, params);
+// WASM / scalar-math: single-threaded, use thread_local RefCell.
+// No RwLock, no lazy_static — both require threading support absent in WASM.
+#[cfg(any(
+    target_arch = "wasm32",
+    feature = "scalar-math"
+))]
+mod store_impl {
+    use super::{WaveParams, CircularParams};
+    use std::collections::HashMap;
+    use std::cell::RefCell;
+
+    thread_local! {
+        static WAVE:     RefCell<HashMap<u16, WaveParams>>     = RefCell::new(HashMap::new());
+        static CIRCULAR: RefCell<HashMap<u16, CircularParams>> = RefCell::new(HashMap::new());
+    }
+
+    pub fn reg_wave(id: u16, p: WaveParams) {
+        WAVE.with(|m| m.borrow_mut().insert(id, p));
+    }
+    pub fn reg_circular(id: u16, p: CircularParams) {
+        CIRCULAR.with(|m| m.borrow_mut().insert(id, p));
+    }
+    pub fn unreg_wave(id: u16) {
+        WAVE.with(|m| m.borrow_mut().remove(&id));
+    }
+    pub fn unreg_circular(id: u16) {
+        CIRCULAR.with(|m| m.borrow_mut().remove(&id));
+    }
+    pub fn clear() {
+        WAVE.with(|m| m.borrow_mut().clear());
+        CIRCULAR.with(|m| m.borrow_mut().clear());
+    }
+    pub fn get_wave(id: u16) -> Option<WaveParams> {
+        WAVE.with(|m| m.borrow().get(&id).copied())
+    }
+    pub fn get_circular(id: u16) -> Option<CircularParams> {
+        CIRCULAR.with(|m| m.borrow().get(&id).copied())
     }
 }
 
-pub fn unregister_wave(config_id: u16) {
-    if let Ok(mut map) = WAVE_PARAMS.write() {
-        map.remove(&config_id);
-    }
-}
+// ── Public API (delegates to platform impl) ───────────────────────────────────
 
-pub fn unregister_circular(config_id: u16) {
-    if let Ok(mut map) = CIRCULAR_PARAMS.write() {
-        map.remove(&config_id);
-    }
-}
+pub fn register_wave(id: u16, p: WaveParams)     { store_impl::reg_wave(id, p); }
+pub fn register_circular(id: u16, p: CircularParams) { store_impl::reg_circular(id, p); }
+pub fn unregister_wave(id: u16)                  { store_impl::unreg_wave(id); }
+pub fn unregister_circular(id: u16)              { store_impl::unreg_circular(id); }
+pub fn clear_all()                               { store_impl::clear(); }
 
-pub fn clear_all() {
-    if let Ok(mut map) = WAVE_PARAMS.write()     { map.clear(); }
-    if let Ok(mut map) = CIRCULAR_PARAMS.write() { map.clear(); }
-}
-
-// ── Tick-time lookups (called from simulation.rs hot loop) ────────────────────
-
-/// Returns WaveParams for the given config_id, or None if not registered.
-/// Called only for projectiles with movement_type == MOVE_WAVE.
 #[inline(always)]
-pub fn get_wave(config_id: u16) -> Option<WaveParams> {
-    WAVE_PARAMS.read().ok()?.get(&config_id).copied()
-}
-
-/// Returns CircularParams for the given config_id, or None if not registered.
-/// Called only for projectiles with movement_type == MOVE_CIRCULAR.
+pub fn get_wave(id: u16)     -> Option<WaveParams>     { store_impl::get_wave(id) }
 #[inline(always)]
-pub fn get_circular(config_id: u16) -> Option<CircularParams> {
-    CIRCULAR_PARAMS.read().ok()?.get(&config_id).copied()
-}
+pub fn get_circular(id: u16) -> Option<CircularParams> { store_impl::get_circular(id) }
